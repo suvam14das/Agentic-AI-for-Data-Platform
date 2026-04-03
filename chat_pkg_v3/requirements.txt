@@ -1,0 +1,17 @@
+oci
+langchain
+langchain-community
+jaydebeapi
+pandas
+jq
+tqdm
+faiss-cpu
+openpyxl
+unstructured
+langchain-oci
+fastapi
+uvicorn
+networkx
+msoffcrypto-tool
+matplotlib
+mcp
