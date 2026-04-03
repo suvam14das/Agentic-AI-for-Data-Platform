@@ -1,0 +1,8 @@
+
+{"model_name":"cohere.command-r-16k",
+"embedding_model_name":"cohere.embed-english-v3.0",
+"endpoint":"https://inference.generativeai.uk-london-1.oci.oraclecloud.com",
+"compartment_ocid":"ocid1.compartment.oc1..aaaaaaaaac64gw2jhiwemjswhxb5odbwpaktqxt5ublisya2uotjn7g6wxqa",
+"langchain_endpoint":"https://api.smith.langchain.com",
+"langchain_key":"<your langchain key>"
+}
