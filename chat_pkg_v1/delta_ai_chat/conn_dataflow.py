@@ -45,7 +45,7 @@ def wrapper_retry_timer(self, func, n_retries=1, n_delay=1):
 
 class DataflowConnector:
     JDBC_JAR = "SimbaSparkJDBC-2.6.18.2067/SimbaSparkJDBC42-2.6.18.2067/SparkJDBC42.jar"
-    BASE_JDBC_URL = "jdbc:spark://anuwcljtrd43h2iairseyykx4siorq343qotpygzr2uilwu6adpy3lzisx2q.interactive.dataflowclusters.us-ashburn-1.oci.oraclecloud.com/default;SparkServerType=DFI;httpPath=cliservice"
+    BASE_JDBC_URL = "<jdbc-url>"
     JDBC_DRIVER = "com.simba.spark.jdbc.Driver"
 
     def __init__(self, profile_name):
