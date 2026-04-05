@@ -44,7 +44,7 @@ def wrapper_retry_timer(self, func, n_retries=1, n_delay=1):
     return inner
 
 class DataflowConnector:
-    JDBC_JAR = "SimbaSparkJDBC-2.6.18.2067/SimbaSparkJDBC42-2.6.18.2067/SparkJDBC42.jar"
+    JDBC_JAR = os.path.join(os.path.dirname(__file__), "SimbaSparkJDBC-2.6.18.2067/SimbaSparkJDBC42-2.6.18.2067/SparkJDBC42.jar")
     BASE_JDBC_URL = "<jdbc-url>"
     JDBC_DRIVER = "com.simba.spark.jdbc.Driver"
 
