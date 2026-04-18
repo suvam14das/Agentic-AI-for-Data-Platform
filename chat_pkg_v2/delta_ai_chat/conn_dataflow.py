@@ -2,6 +2,9 @@ import re
 import subprocess
 import sys
 from time import sleep, time
+import math
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
 import jaydebeapi
 import jpype
@@ -44,8 +47,9 @@ def wrapper_retry_timer(self, func, n_retries=1, n_delay=1):
     return inner
 
 class DataflowConnector:
+    _TUPLE_STR_RE = re.compile(r"^\(([^()]+)\)$")
     JDBC_JAR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SimbaSparkJDBC-2.6.18.2067/SimbaSparkJDBC42-2.6.18.2067/SparkJDBC42.jar")
-    BASE_JDBC_URL = "<jdbc-url>"
+    BASE_JDBC_URL = "jdbc:spark://anuwcljtrd43h2iairseyykx4siorq343qotpygzr2uilwu6adpy3lzisx2q.interactive.dataflowclusters.us-ashburn-1.oci.oraclecloud.com/default;SparkServerType=DFI;httpPath=cliservice"
     JDBC_DRIVER = "com.simba.spark.jdbc.Driver"
 
     def __init__(self, profile_name):
@@ -86,29 +90,73 @@ class DataflowConnector:
 
     def dataframe_to_clean_string(self, df: pd.DataFrame) -> str:
         """
+        Debug helper (not used for downstream parsing anymore).
+
         Converts a pandas DataFrame to a formatted string,
         then collapses tuple-like values (p, h, x, 1, 4, ., 4)
         into proper strings (phx14.4) while preserving table formatting.
         """
-        
-        # Step 1: Convert dataframe to formatted string
         df_string = df.to_string()
-        
-        # Step 2: Regex to find tuple-like patterns
-        # Matches: (p, h, x, 1, 4, ., 4)
+
         pattern = re.compile(r"\(([^()]+)\)")
-        
+
         def collapse_match(match):
             content = match.group(1)
-            # Split by comma and strip spaces
             chars = [x.strip() for x in content.split(",")]
-            # Join everything together
-            return "".join(chars)
-        
-        # Step 3: Replace tuples with collapsed string
+            return "".join(chars) + "|"
+
         cleaned_string = pattern.sub(collapse_match, df_string)
-        
         return cleaned_string
+
+    def _collapse_malformed_tuple_value(self, v: Any) -> Any:
+        """
+        Deterministically normalize cell values that come back as malformed tuples.
+
+        Supported inputs:
+        - Python tuple/list: ('p','h','x') -> 'phx'
+        - String that looks like a tuple: "(p, h, x)" -> "phx"
+        """
+        if v is None:
+            return None
+
+        # pandas NaN values
+        if isinstance(v, float) and math.isnan(v):
+            return None
+
+        # pandas NaT
+        if v is pd.NaT:
+            return None
+
+        if isinstance(v, (tuple, list)):
+            return "".join([str(x).strip() for x in v])
+
+        if isinstance(v, str):
+            s = v.strip()
+            m = self._TUPLE_STR_RE.match(s)
+            if m:
+                parts = [p.strip() for p in m.group(1).split(",")]
+                return "".join(parts)
+            return v
+
+        return v
+
+    def dataframe_to_columns_rows(self, df: pd.DataFrame, max_rows: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Convert DataFrame to a deterministic python object:
+          {"columns": [...], "rows": [[...],[...]]}
+
+        This avoids any LLM formatting and avoids truncation/token limits.
+        """
+        if max_rows is not None:
+            df = df.head(max_rows)
+
+        columns: List[str] = [str(c) for c in df.columns.tolist()]
+        rows: List[List[Any]] = []
+
+        for row in df.itertuples(index=False, name=None):
+            rows.append([self._collapse_malformed_tuple_value(v) for v in row])
+
+        return {"columns": columns, "rows": rows}
         
     def check_connection(self):
         try:
@@ -120,19 +168,29 @@ class DataflowConnector:
         except Exception:
             return False
     
-    def pull_data(self, query):
-        # if not self.check_connection():
-        #     self.connect()
+    def pull_data(self, query, max_rows: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Execute SQL and return a deterministic python object with columns/rows.
 
+        This is intentionally NOT a large formatted string to avoid downstream
+        truncation/token-limit issues.
+
+        Args:
+          query: SQL query string
+          max_rows: optional cap for rows returned in-memory (CSV persistence can still
+                    choose to write full data if desired). If None, returns all rows.
+        """
         print("Retrieving data")
         try:
             df = pd.read_sql_query(query, self.connection)
-            # print(df)
-            # return df
-            print(self.dataframe_to_clean_string(df))
-            return self.dataframe_to_clean_string(df)
+            # Optional debug (do not use for parsing):
+            # print(self.dataframe_to_clean_string(df))
+            print("Data retrieval successful, processing into columns/rows format")
+            print(self.dataframe_to_columns_rows(df, max_rows=max_rows))
+            return self.dataframe_to_columns_rows(df, max_rows=max_rows)
+        
         except Exception as e:
-            raise(e)
+            raise (e)
 
     def close(self):
         if self.connection:
@@ -141,11 +199,11 @@ class DataflowConnector:
             print("Connection closed")
 
 
-# if __name__ == "__main__":
-#     dataflow_conn = DataflowConnector('bmc-sie-prod')
-#     sql_query = "SHOW DATABASES"
-#     df = dataflow_conn.pull_data(sql_query)
-#     if df is not None:
-#         print(df)
-#         print("✅ Extracted data successfully!")
-#     dataflow_conn.close()
+if __name__ == "__main__":
+    dataflow_conn = DataflowConnector('bmc-sie-prod')
+    sql_query = "SHOW DATABASES"
+    df = dataflow_conn.pull_data(sql_query)
+    if df is not None:
+        print(df)
+        print("✅ Extracted data successfully!")
+    dataflow_conn.close()

@@ -1,0 +1,7 @@
+Suggestions to create schema docs : 
+
+1. Make an Excel file for schemas
+2. one sheet for listing all the tables and its short descriptions 
+3. Then each sheet should have one table definition as :
+    database | table_name | column_name | data_type | description
+4. That way the generate_vector_store.py code embed entire table info in one chunk. 
