@@ -249,10 +249,9 @@ class DeltaAIChat:
 
     def initialize_clients(self):
         self.llm = ChatOCIGenAI(
-            # model_id="ocid1.generativeaimodel.oc1.iad.amaaaaaask7dceyaeo4ehrn25guuats5s45hnvswlhxo6riop275l2bkr2vq", #gemini flash
-            model_id="ocid1.generativeaimodel.oc1.iad.amaaaaaask7dceyargceyuaysrjzo2metq2rinavayxqmpu7tkm6mmfojcvq", #gemini pro
+            model_id="ocid1.generativeaimodel....",
             service_endpoint="https://inference.generativeai.us-ashburn-1.oci.oraclecloud.com",
-            compartment_id="ocid1.tenancy.oc1..aaaaaaaat3gxqmhzhjniz6udhx6ak6nngup2quzdahdztnhl7p4oznurigfq",
+            compartment_id="ocid1.tenancy.oc1...",
             auth_type="SECURITY_TOKEN",
             auth_profile=self.auth_profile,
             provider="generic",
@@ -262,7 +261,7 @@ class DeltaAIChat:
         self.embeddings = OCIGenAIEmbeddings(
             model_id="cohere.embed-english-v3.0",
             service_endpoint="https://inference.generativeai.uk-london-1.oci.oraclecloud.com",
-            compartment_id="ocid1.compartment.oc1..aaaaaaaaac64gw2jhiwemjswhxb5odbwpaktqxt5ublisya2uotjn7g6wxqa",
+            compartment_id="ocid1.compartment.oc1...",
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
             auth_profile=self.auth_profile
