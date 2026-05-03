@@ -249,8 +249,7 @@ class DeltaAIChat:
 
     def initialize_clients(self):
         self.llm = ChatOCIGenAI(
-            # model_id="REDACTED_OCID", #gemini flash
-            model_id="REDACTED_OCID", #gemini pro
+            model_id="REDACTED_OCID",
             service_endpoint="https://example.invalid",
             compartment_id="REDACTED_OCID",
             auth_type="SECURITY_TOKEN",
