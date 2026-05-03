@@ -1,4 +1,6 @@
+from ast import arguments
 from datetime import datetime
+import asyncio
 import json
 import os
 import sys
@@ -12,24 +14,20 @@ from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from langchain_oci.embeddings import OCIGenAIEmbeddings
 import re
 from langchain_community.vectorstores import FAISS
-from langchain_classic.tools import StructuredTool
-
-# NOTE (v4 packaging):
-# - LangGraph is used ONLY inside this core (DeltaAIChat) as the orchestration engine.
-# - Structured tools are defined in `tools_registry.py` and are exposed via the standalone MCP server
-#   `tools_server.py` for external agents (Cline/others). Core can also use them locally via ToolsManager.
-from pydantic import BaseModel
+# NOTE:
+# - LangGraph is used inside this core (DeltaAIChat) as the orchestration engine.
+# - Tools are bound directly from the local tools registry.
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 sys.path.append(os.path.dirname(__file__))
-try :
+try:
     from delta_ai_chat.generate_vector_store import generate_vector_store
-    from delta_ai_chat.tools_registry import ToolsManager
 except ImportError:
     from generate_vector_store import generate_vector_store
-    from tools_registry import ToolsManager
+
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 
 # LangGraph imports
@@ -43,6 +41,7 @@ COLOR_BLUE = "\033[94m"
 COLOR_YELLOW = "\033[93m"
 COLOR_RESET = "\033[0m"
 COLOR_RED = "\033[91m"
+
 
 system_prompt = """
 
@@ -92,34 +91,22 @@ You MUST follow these rules when selecting tools:
    - "describe table"
    - "what columns exist"
 
-7. Use 'visualize' to generate charts from data, usually after getting JSON from run_sql and if the user requests a chart or visualization. Call with input_str as a JSON string: {{"data": [list of dicts from run_sql rows], "chart_type": "bar" or "line" or "pie", "x": "label_column", "y": "value_column"}}. Choose appropriate chart_type, x, y based on data or what is asked by user.
-
-8. Use 'format_to_html' to convert JSON from run_sql to HTML table when you need to display tabular data, usually after getting JSON from run_sql and if no visualization is requested. Pass the exact JSON string from run_sql.
+7. Use 'visualize' to generate charts from data only after a successful run_sql and only if the user requests a chart or visualization. run_sql returns an <artifact> payload containing the CSV artifact path. Use the latest available csv_path from that artifact and call visualize with csv_path, chart_type, x, and y. Choose appropriate chart_type, x, and y based on data or what is asked by the user.
 
 Decision Logic:
 - For every new user question or refinement: Always start by calling 'retrieval' to verify relevant schema, metadata, or documentation. Use the retrieved information to inform subsequent actions, such as building SQL queries or deciding on visualization.
 - If proposal needed for retrieval/run_sql and no confirmation in history: Respond with proposal message (no tool call).
 - If confirmation received: Call the appropriate tool.
 - For direct answers (non-database): Respond with message (no tool call).
-- After receiving ToolMessage from run_sql with JSON data:
-  - If user query involves charting/visualization: Call 'visualize' with constructed input_str. ALWAYS generate the full chart config JSON in the tool and return it.
-  - Otherwise: Call 'format_to_html' with the JSON string.
-  - If visualization fails (e.g., error in ToolMessage): Respond with error explanation.
+- After receiving ToolMessage from run_sql:
+  - If status is error: fix query and retry.
+  - If status is ok and type is table/csv: present the CSV artifact reference (frontend will render it in a floating panel). If the user later asks for a graph, use the csv_path from the latest <artifact> output as input to visualize.
+- After receiving ToolMessage from visualize with chart config JSON: return it. visualize is a terminal tool and should be used with csv_path, chart_type, x, and y.
 - Take care of possible errors in visualization like: All arrays must be of the same length - choose suitable x/y or adjust data.
 """
 
 
-class RetrievalInput(BaseModel):
-    query: str
 
-class RunSQLInput(BaseModel):
-    sql: str
-
-class FormatToHTMLInput(BaseModel):
-    json_str: str
-
-class VisualizeInput(BaseModel):
-    input_str: str
 
 
 
@@ -129,7 +116,138 @@ class DeltaAIChat:
 
         self.summary_file = summary_file
         self.auth_profile = profile_name
+        self.authenticate()
+        self.initialize_clients()
 
+        self.memory = ConversationBufferWindowMemory(
+            memory_key="chat_history", input_key="input", return_messages=True, k=5
+        )
+
+        # Tools are initialized lazily on first request from the MCP SSE server.
+        self._tool_schemas_loaded = False
+        self.tools = []
+        self.llm_with_tools = None
+        self.mcp_client = None
+        self.mcp_server_url = os.environ.get("DELTA_AI_MCP_SSE_URL", "http://127.0.0.1:8765/sse")
+
+        def agent_node(state: MessagesState):
+            print("\nEntering agent_node")
+            print("Current state messages:", [msg.content for msg in state["messages"]])
+            messages = [SystemMessage(content=system_prompt)] + state["messages"]
+            try:
+                response = self.llm_with_tools.invoke(messages)
+                print("Agent response:", response.content)
+                if response.tool_calls:
+                    print("Tool calls:", response.tool_calls)
+            except Exception as e:
+                error_str = str(e)
+                print(f"{COLOR_RED}Error in agent_node: {error_str}{COLOR_RESET}")
+                if "401" in error_str:
+                    self.authenticate()
+                    self.initialize_clients()
+                    if self._tool_schemas_loaded and self.tools:
+                        self.llm_with_tools = self.llm.bind_tools(self.tools)
+                    response = self.llm_with_tools.invoke(messages)
+                    print("Agent response after retry:", response.content)
+                    if response.tool_calls:
+                        print("Tool calls after retry:", response.tool_calls)
+                else:
+                    raise e
+
+            print("Exiting agent_node\n")
+            return {"messages": [response]}
+
+        async def tool_node(state: MessagesState):
+            print("\nEntering tool_node")
+            last_message = state["messages"][-1]
+            print("Last message (AIMessage):", last_message.content)
+            print("Tool calls to execute:", last_message.tool_calls)
+            tool_results = []
+
+            def normalize_tool_result(result):
+                if isinstance(result, str):
+                    return result
+                if isinstance(result, list) and result:
+                    first_item = result[0]
+                    if isinstance(first_item, dict) and first_item.get("type") == "text":
+                        return first_item.get("text", str(result))
+                return str(result)
+
+            for tool_call in last_message.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call.get("args") or {}
+                print(f"Executing tool: {tool_name} with args: {tool_args}")
+                try:
+                    tool = next((t for t in self.tools if t.name == tool_name), None)
+                    if tool is None:
+                        raise RuntimeError(f"Tool not found in bound tools: {tool_name}")
+                    
+                    try:
+                        result = await tool.ainvoke(tool_args)
+                    except RuntimeError as exc:
+                        raise RuntimeError(f"Error invoking tool '{tool_name}': {str(exc)}") from exc
+
+                    result = normalize_tool_result(result)
+                    print(f"Tool result: {result}")
+                except Exception as e:
+                    result = f"Error executing {tool_name}: {str(e)}"
+                    print(f"{COLOR_RED}{result}{COLOR_RESET}")
+
+                tool_results.append(
+                    ToolMessage(
+                        content=result,
+                        name=tool_name,
+                        tool_call_id=tool_call["id"],
+                    )
+                )
+            print("Exiting tool_node\n")
+            return {"messages": tool_results}
+
+        def should_continue(state: MessagesState):
+            print("\nEntering should_continue")
+            last_message = state["messages"][-1]
+            print("Last message type:", type(last_message).__name__)
+            if isinstance(last_message, AIMessage):
+                if last_message.tool_calls:
+                    print("Routing to 'tools' (has tool_calls)")
+                    return "tools"
+                print("Routing to END (no tool_calls)")
+                return END
+            if isinstance(last_message, ToolMessage):
+                if last_message.name == "visualize":
+                    print(f"Routing to END (terminal tool: {last_message.name})")
+                    return END
+                if last_message.name == "run_sql":
+                    try:
+                        payload = json.loads(last_message.content)
+                        if payload.get("status") == "ok":
+                            print("Routing to END (run_sql ok)")
+                            return END
+                        print("Routing to 'agent' (run_sql error)")
+                        return "agent"
+                    except Exception:
+                        print("Routing to 'agent' (run_sql non-JSON result)")
+                        return "agent"
+                print(f"Routing to 'agent' (non-terminal tool: {last_message.name})")
+                return "agent"
+            print("Default routing to END")
+            return END
+
+        builder = StateGraph(MessagesState)
+        builder.add_node("agent", agent_node)
+        builder.add_node("tools", tool_node)
+        builder.set_entry_point("agent")
+        builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+        builder.add_conditional_edges("tools", should_continue, {"agent": "agent", END: END})
+        self.graph = builder.compile()
+
+    def authenticate(self):
+        os.system(
+            "oci session authenticate --profile-name bmc-sie-prod "
+            "--region us-ashburn-1 --tenancy-name bmc_operator_access --auth security_token"
+        )
+
+    def initialize_clients(self):
         self.llm = ChatOCIGenAI(
             # model_id="ocid1.generativeaimodel.oc1.iad.amaaaaaask7dceyaeo4ehrn25guuats5s45hnvswlhxo6riop275l2bkr2vq", #gemini flash
             model_id="ocid1.generativeaimodel.oc1.iad.amaaaaaask7dceyargceyuaysrjzo2metq2rinavayxqmpu7tkm6mmfojcvq", #gemini pro
@@ -147,113 +265,52 @@ class DeltaAIChat:
             compartment_id="ocid1.compartment.oc1..aaaaaaaaac64gw2jhiwemjswhxb5odbwpaktqxt5ublisya2uotjn7g6wxqa",
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
-            auth_profile=profile_name,
+            auth_profile=self.auth_profile
         )
 
         self.vectorstore = FAISS.load_local(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vectorstore"), embeddings=self.embeddings, allow_dangerous_deserialization=True)
         self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 5})
 
-        self.memory = ConversationBufferWindowMemory(
-            memory_key="chat_history", input_key="input", return_messages=True, k=5
+    async def _load_mcp_tools_async(self) -> None:
+        if self._tool_schemas_loaded:
+            return
+
+        self.mcp_client = MultiServerMCPClient(
+            {
+                "delta-ai-tools": {
+                    "transport": "sse",
+                    "url": self.mcp_server_url,
+                }
+            }
         )
-
-        # Local tool registry (single source of truth)
-        self.tools_manager = ToolsManager(profile_name=self.auth_profile)
-        self.tool_specs =  self.tools_manager.build_tool_specs()
-
-        self.tools = [
-            StructuredTool.from_function(
-                func=lambda _spec=spec, **kwargs: _spec.handler(_spec.input_model.model_validate(kwargs)),
-                name=spec.name,
-                description=spec.description,
-                args_schema=spec.input_model,
-            )
-            for spec in self.tool_specs
-        ]
+        self.tools = await self.mcp_client.get_tools()
         self.llm_with_tools = self.llm.bind_tools(self.tools)
-        self.tool_dict = {t.name: t for t in self.tools}
+        self._tool_schemas_loaded = True
 
-        # Define nodes and graph
-        def agent_node(state: MessagesState):
-            print("\nEntering agent_node")
-            print("Current state messages:", [msg.content for msg in state["messages"]])
-            messages = [SystemMessage(content=system_prompt)] + state["messages"]
-            try:
-                response = self.llm_with_tools.invoke(messages)
-                print("Agent response:", response.content)
-                if response.tool_calls:
-                    print("Tool calls:", response.tool_calls)
-            except Exception as e:
-                error_str = str(e)
-                print(f"{COLOR_RED}Error in agent_node: {error_str}{COLOR_RESET}")
-                raise e
-            
-            print("Exiting agent_node\n")
-            return {"messages": [response]}
+    async def _ensure_tools_loaded(self) -> None:
+        if self._tool_schemas_loaded:
+            return
+        try:
+            await self._load_mcp_tools_async()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load tools from MCP server. Ensure the MCP server is running and accessible at the specified URL : {str(exc)}"
+            ) from exc
 
-        def tool_node(state: MessagesState):
-            print("\nEntering tool_node")
-            last_message = state["messages"][-1]
-            print("Last message (AIMessage):", last_message.content)
-            print("Tool calls to execute:", last_message.tool_calls)
-            tool_results = []
-            for tool_call in last_message.tool_calls:
-                tool = self.tool_dict[tool_call["name"]]
-                print(f"Executing tool: {tool_call['name']} with args: {tool_call['args']}")
-                try:
-                    result = tool.run(tool_call["args"])
-                    print(f"Tool result: {result}")
-                except Exception as e:
-                    result = f"Error executing {tool_call['name']}: {str(e)}"
-                    print(f"{COLOR_RED}{result}{COLOR_RESET}")
-                tool_results.append(
-                    ToolMessage(
-                        content=str(result),
-                        name=tool_call["name"],
-                        tool_call_id=tool_call["id"]
-                    )
-                )
-            print("Exiting tool_node\n")
-            return {"messages": tool_results}
+    async def get_agent_response(self, user_query):
+        await self._ensure_tools_loaded()
 
-        def should_continue(state: MessagesState):
-            print("\nEntering should_continue")
-            last_message = state["messages"][-1]
-            print("Last message type:", type(last_message).__name__)
-            if isinstance(last_message, AIMessage):
-                if last_message.tool_calls:
-                    print("Routing to 'tools' (has tool_calls)")
-                    return "tools"
-                print("Routing to END (no tool_calls)")
-                return END
-            if isinstance(last_message, ToolMessage):
-                if last_message.name in ["format_to_html", "visualize"]:
-                    print(f"Routing to END (terminal tool: {last_message.name})")
-                    return END
-                print(f"Routing to 'agent' (non-terminal tool: {last_message.name})")
-                return "agent"
-            print("Default routing to END")
-            return END
-
-        builder = StateGraph(MessagesState)
-        builder.add_node("agent", agent_node)
-        builder.add_node("tools", tool_node)
-        builder.set_entry_point("agent")
-        builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
-        builder.add_conditional_edges("tools", should_continue, {"agent": "agent", END: END})
-        self.graph = builder.compile()
-
-    def get_agent_response(self, user_query):
         chat_history = self.memory.load_memory_variables({})["chat_history"]
-        state = self.graph.invoke({"messages": chat_history + [HumanMessage(content=user_query)]})
+        state = await self.graph.ainvoke({"messages": chat_history + [HumanMessage(content=user_query)]})
         last_msg = state["messages"][-1]
         if isinstance(last_msg, AIMessage):
             response_text = last_msg.content
         elif isinstance(last_msg, ToolMessage):
             if last_msg.name == "visualize":
-                response_text = f'<chart-data>{last_msg.content}</chart-data>'
-            elif last_msg.name == "format_to_html":
-                response_text = last_msg.content
+                response_text = f"<chart-data>{last_msg.content}</chart-data>"
+            elif last_msg.name == "run_sql":
+                # run_sql returns artifact JSON (ok/error). For ok: include machine-readable payload.
+                response_text = f"Query executed. Here is the result : <artifact>{last_msg.content}</artifact>"
             else:
                 response_text = str(last_msg.content)
         else:
@@ -288,22 +345,22 @@ class DeltaAIChat:
         else:
             print(f"{COLOR_YELLOW}No history.{COLOR_RESET}")
 
-    def close(self):
-        self.tools_manager.cleanup()
-        sys.exit(0)
+    async def aclose(self):
+        close_method = getattr(self.mcp_client, "aclose", None)
+        if callable(close_method):
+            await close_method()
 
     # Used Only for terminal runs
-    def process_input(self, user_input):
+    async def process_input(self, user_input):
         if user_input.lower() == "memorize":
             self.save_summary()
             return
         
-        if user_input.lower() == 'exit':
-            self.close()
+        if user_input.lower() == "exit":
+            await self.aclose()
             return
-        
-        self.get_agent_response(user_input)
-        # print(f"{COLOR_YELLOW}{response_text}{COLOR_RESET}")
+
+        await self.get_agent_response(user_input)
 
 # For testing as script
 if __name__ == "__main__":
@@ -311,4 +368,4 @@ if __name__ == "__main__":
     print(f"{COLOR_YELLOW}Agent: Welcome to Delta AI Chat! How can I help you today?{COLOR_RESET}")
     while True:
         user_input = input(f"{COLOR_BLUE}You: {COLOR_RESET}").strip()
-        chat.process_input(user_input)
+        asyncio.run(chat.process_input(user_input))
