@@ -13,23 +13,17 @@ from langchain_oci.embeddings import OCIGenAIEmbeddings
 import re
 from langchain_community.vectorstores import FAISS
 from langchain_classic.tools import StructuredTool
-
-# NOTE (v4 packaging):
-# - LangGraph is used ONLY inside this core (DeltaAIChat) as the orchestration engine.
-# - Structured tools are defined in `tools_registry.py` and are exposed via the standalone MCP server
-#   `tools_server.py` for external agents (Cline/others). Core can also use them locally via ToolsManager.
 from pydantic import BaseModel
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-sys.path.append(os.path.dirname(__file__))
+
 try :
+    from delta_ai_chat.conn_dataflow import DataflowConnector
     from delta_ai_chat.generate_vector_store import generate_vector_store
-    from delta_ai_chat.tools_registry import ToolsManager
 except ImportError:
+    from conn_dataflow import DataflowConnector
     from generate_vector_store import generate_vector_store
-    from tools_registry import ToolsManager
 
 
 # LangGraph imports
@@ -45,6 +39,7 @@ COLOR_RESET = "\033[0m"
 COLOR_RED = "\033[91m"
 
 system_prompt = """
+History : {chat_history}
 
 Rules :
 1. Respond concisely with only relevant details and still be polite and helpful. Use Markdown formatting for better readability, such as bullets for lists, tables for data, bold/italics for emphasis, and proper paragraphs with line breaks. If the user is asking a general Compute domain question first look for in the documentations. 
@@ -121,12 +116,11 @@ class FormatToHTMLInput(BaseModel):
 class VisualizeInput(BaseModel):
     input_str: str
 
-
-
 class DeltaAIChat:
 
     def __init__(self, profile_name='DEFAULT', summary_file="delta_ai_chat/general_docs/chat_history_summary.txt"):
 
+        self.oc1_delta_conn = DataflowConnector(profile_name)
         self.summary_file = summary_file
         self.auth_profile = profile_name
 
@@ -153,23 +147,94 @@ class DeltaAIChat:
         self.vectorstore = FAISS.load_local(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vectorstore"), embeddings=self.embeddings, allow_dangerous_deserialization=True)
         self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 5})
 
-        self.memory = ConversationBufferWindowMemory(
-            memory_key="chat_history", input_key="input", return_messages=True, k=5
+        self.memory = ConversationBufferWindowMemory(memory_key="chat_history", input_key="input", return_messages=True, k=5)
+
+        # Define tools as StructuredTool
+        retrieval_tool = StructuredTool.from_function(
+            func=lambda query: "\n\n".join([d.page_content for d in self.retriever.invoke(query)]),
+            name="retrieval",
+            description="Retrieve information from documentation for general compute domain questions.",
+            args_schema=RetrievalInput
         )
 
-        # Local tool registry (single source of truth)
-        self.tools_manager = ToolsManager(profile_name=self.auth_profile)
-        self.tool_specs =  self.tools_manager.build_tool_specs()
+        run_sql_tool = StructuredTool.from_function(
+            func=lambda sql: self.execute_query(sql, "")[0],
+            name="run_sql",
+            description="Execute a Spark SQL query on the Delta Lake database and return JSON string for data or formatted error message.",
+            args_schema=RunSQLInput
+        )
 
-        self.tools = [
-            StructuredTool.from_function(
-                func=lambda _spec=spec, **kwargs: _spec.handler(_spec.input_model.model_validate(kwargs)),
-                name=spec.name,
-                description=spec.description,
-                args_schema=spec.input_model,
-            )
-            for spec in self.tool_specs
-        ]
+        format_to_html_tool = StructuredTool.from_function(
+            func=lambda json_str: self.json_to_html(json.loads(json_str)),
+            name="format_to_html",
+            description="Convert a JSON string (with 'columns' and 'rows') to an HTML table string for display.",
+            args_schema=FormatToHTMLInput
+        )
+
+        def create_chart(input_str):
+            try:
+                input_data = json.loads(input_str)
+                data = input_data['data']
+                chart_type = input_data.get('chart_type', 'bar')
+                x = input_data.get('x')
+                y = input_data.get('y')
+
+                df = pd.DataFrame(data)
+                labels = df[x].tolist()
+                values = df[y].tolist()
+
+                chart_config = {
+                    "type": chart_type,
+                    "data": {
+                        "labels": labels,
+                        "datasets": [{
+                            "label": y,
+                            "data": values,
+                            "backgroundColor": "rgba(75, 192, 192, 0.2)",
+                            "borderColor": "rgba(75, 192, 192, 1)",
+                            "borderWidth": 1
+                        }]
+                    },
+                    "options": {
+                        "scales": {
+                            "y": {
+                                "beginAtZero": True
+                            }
+                        },
+                        "plugins": {
+                            "legend": {
+                                "display": True
+                            }
+                        },
+                        "responsive": True,
+                        "maintainAspectRatio": False
+                    }
+                }
+
+                if chart_type == 'pie':
+                    chart_config["data"]["datasets"][0].pop("borderColor", None)
+                    chart_config["data"]["datasets"][0].pop("borderWidth", None)
+                    chart_config["data"]["datasets"][0]["backgroundColor"] = [
+                        "rgba(255, 99, 132, 0.2)",
+                        "rgba(54, 162, 235, 0.2)",
+                        "rgba(255, 206, 86, 0.2)",
+                        "rgba(75, 192, 192, 0.2)",
+                        "rgba(153, 102, 255, 0.2)"
+                    ]  # Example colors
+
+                return json.dumps(chart_config)
+
+            except Exception as e:
+                return str(e)
+
+        visualize_tool = StructuredTool.from_function(
+            func=create_chart,
+            name="visualize",
+            description="Generate Chart.js configuration JSON from JSON data string (with 'data' as list of dicts, 'chart_type' (bar, line, pie), 'x', 'y').",
+            args_schema=VisualizeInput
+        )
+
+        self.tools = [retrieval_tool, run_sql_tool, format_to_html_tool, visualize_tool]
         self.llm_with_tools = self.llm.bind_tools(self.tools)
         self.tool_dict = {t.name: t for t in self.tools}
 
@@ -177,7 +242,7 @@ class DeltaAIChat:
         def agent_node(state: MessagesState):
             print("\nEntering agent_node")
             print("Current state messages:", [msg.content for msg in state["messages"]])
-            messages = [SystemMessage(content=system_prompt)] + state["messages"]
+            messages = [SystemMessage(content=system_prompt.format(chat_history=state["messages"]))] + state["messages"]
             try:
                 response = self.llm_with_tools.invoke(messages)
                 print("Agent response:", response.content)
@@ -185,9 +250,17 @@ class DeltaAIChat:
                     print("Tool calls:", response.tool_calls)
             except Exception as e:
                 error_str = str(e)
-                print(f"{COLOR_RED}Error in agent_node: {error_str}{COLOR_RESET}")
-                raise e
-            
+                if '401' in error_str:
+                    print(f"{COLOR_RED}401 error detected in agent. Reconnecting...{COLOR_RESET}")
+                    self.oc1_delta_conn.connect()
+                    self.llm = self.create_llm()
+                    self.llm_with_tools = self.llm.bind_tools(self.tools)
+                    response = self.llm_with_tools.invoke(messages)
+                    print("Agent response after reconnect:", response.content)
+                    if response.tool_calls:
+                        print("Tool calls after reconnect:", response.tool_calls)
+                else:
+                    raise e
             print("Exiting agent_node\n")
             return {"messages": [response]}
 
@@ -210,7 +283,7 @@ class DeltaAIChat:
                     ToolMessage(
                         content=str(result),
                         name=tool_call["name"],
-                        tool_call_id=tool_call["id"]
+                        tool_call_id=tool_call["id"],
                     )
                 )
             print("Exiting tool_node\n")
@@ -261,7 +334,133 @@ class DeltaAIChat:
         self.memory.save_context({"input": user_query}, {"output": response_text})
         print(f"{COLOR_YELLOW}Agent: {response_text}{COLOR_RESET}")
         return response_text, None
-    
+
+    def format_results_with_agent(self, raw_data, is_error=False):
+        
+        if is_error:
+            refinement_prompt = (
+                f"The following error message was returned from a database query:\n {raw_data}\n"
+                "Format this into a concise, user-friendly message using Markdown for better readability. If the error contains technical details, extract the key issue and present it in a way that a non-technical user can understand. Do not include stack traces or overly technical jargon. Focus on the main problem and potential next steps for resolution."
+            )
+            result = self.llm.invoke(refinement_prompt)  # Changed from qa_chain to llm
+            return  result.content.strip()
+        else:
+            refinement_prompt = (
+                f"""
+                
+                Raw DataFrame: \n {raw_data}\n
+                
+                Data formatting : If data header or rows values is in tuples, convert to strings by joining each character in the tuple. Use '' as joining delimiter. For example, (a,b,c,1,.,1) should be converted to 'abc1.1' , (c, o, u, n, t, (, D, I, S, T, I, N, C, T,  , i, d, )) should be converted to 'count(DISTINCT id)' , and similar. Include all characters including numbers and special characters without spaces in between. Do not remove any character from the raw data. 
+                Output format : Return in JSON format only. Do not generate HTML tables. Do not generate additionals comments. The JSON should have two keys: "columns" which is a list of column names, and "rows" which is a list of lists, where each inner list represents a row of data corresponding to the columns. For example: {{'columns': ['col_name', 'data_type', 'comment'], 'rows': [['KievTxnID', 'bigint', None], ['hostsIngested', 'string', None], ['hpcIslandId', 'string', None], ['id', 'string', None], ['multiFaultDomain', 'string', None], ['networkBlockId', 'string', None]]}}
+                """
+            )
+            result = self.llm.invoke(refinement_prompt)
+            print(f"{COLOR_YELLOW}Formatting output: {result.content.strip()}{COLOR_RESET}")
+            data = json.loads(result.content.strip().replace("\n", "").replace("```json", "").replace("```", ""))
+            # print(f"{COLOR_YELLOW}Refined Result: {data}{COLOR_RESET}")
+            return  str(json.dumps(data))
+
+    def execute_query(self, sql_query, user_query):
+            try:
+                self.oc1_delta_conn.check_connection()
+                db_data = self.oc1_delta_conn.pull_data(sql_query)
+                formatted_response = self.format_results_with_agent(db_data)
+                print(f"{COLOR_YELLOW}{formatted_response}{COLOR_RESET}")
+                return formatted_response, None
+            
+            except Exception as e:
+                error_str = str(e)
+                if '401' in error_str:
+                    print(f"{COLOR_RED}401 error detected. Reconnecting...{COLOR_RESET}")
+                    self.oc1_delta_conn.connect()
+                    print(f"{COLOR_RED}Reconnected. Retrying query...{COLOR_RESET}")
+                    # Retry the query once after reconnect
+                    try:
+                        db_data = self.oc1_delta_conn.pull_data(sql_query)
+                        formatted_response = self.format_results_with_agent(db_data)
+                        print(f"{COLOR_YELLOW}{formatted_response}{COLOR_RESET}")
+                        return formatted_response, None
+                    except Exception as retry_e:
+                        print(f"{COLOR_RED}Retry failed: {str(retry_e)[:256]}{COLOR_RESET}")
+                        formatted_response = self.format_results_with_agent(str(retry_e), is_error=True)
+                        return formatted_response, None
+                else:
+                    print(f"{COLOR_RED}Error : {error_str[:256]}{COLOR_RESET}")
+                    formatted_response = self.format_results_with_agent(error_str, is_error=True)
+                    return formatted_response, None
+
+                
+    def json_to_html(self, data):
+        columns = data["columns"]
+        rows = data["rows"]
+
+        style = """
+        <style>
+        table {
+            border-collapse: collapse;
+            width: auto;
+            font-family: Calibri, sans-serif;
+            font-size: 11pt;
+        }
+
+        th, td {
+            border: 1px solid #D3D3D3;
+            padding: 8px;
+        }
+
+        th {
+            background-color: #DCE6F1;
+            font-weight: bold;
+            text-align: center;
+            border-bottom: 2px solid #D3D3D3;
+        }
+
+        tbody tr:nth-child(even) {
+            background-color: #F9F9F9;
+        }
+
+        td.text {
+            text-align: left;
+        }
+
+        td.numeric {
+            text-align: right;
+        }
+        </style>
+        """
+
+        html = style
+        html += "<table>"
+
+        # Header
+        html += "<thead><tr>"
+        for col in columns:
+            html += f"<th>{col}</th>"
+        html += "</tr></thead>"
+
+        # Body
+        html += "<tbody>"
+        for row in rows:
+            html += "<tr>"
+            for value in row:
+
+                # detect numeric values
+                if isinstance(value, (int, float)):
+                    cell_class = "numeric"
+                else:
+                    # try converting numeric strings
+                    try:
+                        float(value)
+                        cell_class = "numeric"
+                    except:
+                        cell_class = "text"
+
+                html += f'<td class="{cell_class}">{value}</td>'
+
+            html += "</tr>"
+        html += "</tbody></table>"
+
+        return  html
 
     def save_summary(self):
         if self.memory.buffer:
@@ -289,7 +488,9 @@ class DeltaAIChat:
             print(f"{COLOR_YELLOW}No history.{COLOR_RESET}")
 
     def close(self):
-        self.tools_manager.cleanup()
+        print(f"Cleaning up resources...")
+        self.oc1_delta_conn.check_connection()    
+        self.oc1_delta_conn.close()
         sys.exit(0)
 
     # Used Only for terminal runs
