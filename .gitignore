@@ -1,1 +1,6 @@
 __pycache__
+.env
+.env.*
+!*.env.example
+**/vectorstore/
+**/general_docs/chat_history_summary.txt

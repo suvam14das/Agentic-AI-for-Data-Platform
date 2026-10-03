@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 import os
+from delta_ai_chat.runtime_config import required_env
 import sys
 import pandas as pd
 from delta_ai_chat.conn_dataflow import DataflowConnector
@@ -36,7 +37,7 @@ Rules :
 3. If the user gives you are query to run don't change the inherent tables, columns and joins. If the SQl needs refinement to run on DeltaLake then refine the SQL with the same tables, columns and joins but make it compatible for SparkSQL and output the refined SQL wrapped in ```sql\nSQL HERE\n``` along with a short reasoning behind the refinement.
 4. Do not use tables that are not present in the database. Do not use columns that are not present in the respective  table.  
 5. Columns must be consistent to the table schema queried. Do not wrap the entire SQL in backticks. Wrap only column names that contains $ with backticks. Always use full name of the column along with proper table alias in the SQL. Try to find the relevant columns within the same table to build the query. 
-6.Always use tables in SQL query in the format <database>.<table> e.g. example_db.hosts, example_db.instances etc. 
+6.Always use tables in SQL query in the format <database>.<table> e.g. example_db.hosts, example_db.instances etc.
 7. For relevant SQLs that supports limit if the limit of rows is not specified or evident use LIMIT 10. 
 8. For general questions, provide a polite direct and relevant response and if the answer is not known just say "Sorry I did not get you. My AI is not AIing!".
 """
@@ -45,16 +46,15 @@ PROMPT = PromptTemplate(
 )
 
 class DeltaAIChat:
-    def __init__(self, profile_name='DEFAULT', summary_file="delta_ai_chat/general_docs/chat_history_summary.txt"):
+    def __init__(self, profile_name=os.environ.get("DELTA_AI_PROFILE", "DEFAULT"), summary_file="delta_ai_chat/general_docs/chat_history_summary.txt"):
         self.properties = LoadProperties()
         self.oc1_delta_conn = DataflowConnector(profile_name)
         self.summary_file = summary_file
 
         self.llm = ChatOCIGenAI(
-            # model_id="REDACTED_OCID", #gemini flash
-            model_id="REDACTED_OCID", #gemini pro
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
+            model_id=required_env("DELTA_AI_LLM_MODEL_ID"), #gemini pro
+            service_endpoint=required_env("DELTA_AI_LLM_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_LLM_COMPARTMENT_ID"),
             auth_type="SECURITY_TOKEN",
             auth_profile=profile_name,
             provider="generic",

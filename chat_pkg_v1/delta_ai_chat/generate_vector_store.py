@@ -1,14 +1,14 @@
 import os
+from delta_ai_chat.runtime_config import authenticate_session, required_env
 
 from langchain_community.document_loaders import DirectoryLoader, UnstructuredExcelLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OCIGenAIEmbeddings
+from langchain_oci.embeddings import OCIGenAIEmbeddings
 try :
     from delta_ai_chat.LoadProperties import LoadProperties
 except ImportError as e:
     from LoadProperties import LoadProperties
-import subprocess
 
 def generate_vector_store():
     properties = LoadProperties()
@@ -21,7 +21,7 @@ def generate_vector_store():
             compartment_id=properties.getCompartment(),
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
-            auth_profile="DEFAULT"
+            auth_profile=os.environ.get("DELTA_AI_PROFILE", "DEFAULT")
         )
         
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -55,14 +55,14 @@ def generate_vector_store():
         error_str = str(e)
         if '401' in error_str:
             print(f"401 error detected during embedding initialization. Re-authenticating...")
-            subprocess.run("oci session authenticate --profile-name DEFAULT --region EXAMPLE_REGION --tenancy-name EXAMPLE_TENANCY --auth security_token", shell=True, check=True)
+            authenticate_session(os.environ.get("DELTA_AI_PROFILE", "DEFAULT"), required=True)
             oci_embeddings = OCIGenAIEmbeddings(
                 model_id=properties.getEmbeddingModelName(),
                 service_endpoint=properties.getEndpoint(),
                 compartment_id=properties.getCompartment(),
                 model_kwargs={"truncate": True},
                 auth_type="SECURITY_TOKEN",
-                auth_profile="DEFAULT"
+                auth_profile=os.environ.get("DELTA_AI_PROFILE", "DEFAULT")
             )
             generate_vector_store()
         else:

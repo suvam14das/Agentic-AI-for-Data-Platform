@@ -27,7 +27,12 @@ try:
 except ImportError:
     from generate_vector_store import generate_vector_store
 
-from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain.mcp import MCPAdapter
+
+try:
+    from delta_ai_chat.runtime_config import authenticate_session, required_env
+except ImportError:
+    from runtime_config import authenticate_session, required_env
 
 
 # LangGraph imports
@@ -50,7 +55,7 @@ Rules :
 2. If the user is asking a Compute domain question that requires data from the DeltaLake DB then use the run_sql tool with appropriate SQL after confirming the query looks good from the user and getting user affirmation.
 3. Do not use tables that are not present in the database. Verify that columns are present for a given table from the retrived knowledge before using it in query.  
 4. Columns must be consistent to the table schema queried. Do not wrap the entire SQL in backticks. ALWAYS wrap column names that contains $ with single backticks. Always use full name of the column along with proper table alias in the SQL. Try to find the relevant columns within the same table to build the query. 
-5. Always use tables in SQL query in the format <database>.<table> e.g. example_db.hosts, example_db.instances etc. 
+5. Always use tables in SQL query in the format <database>.<table> e.g. example_db.hosts, example_db.instances etc.
 6. For relevant SQLs that supports limit if the limit of rows is not specified or evident use LIMIT 10. 
 7. For general questions, provide a polite direct and relevant response and if the answer is not known just say "Sorry I did not get you. My AI is not AIing!".
 8. If the user affirms a previous proposal, proceed with the action in the next response.
@@ -123,12 +128,12 @@ class DeltaAIChat:
             memory_key="chat_history", input_key="input", return_messages=True, k=5
         )
 
-        # Tools are initialized lazily on first request from the MCP SSE server.
+        # Tools are initialized lazily on first request from the MCP server.
         self._tool_schemas_loaded = False
         self.tools = []
         self.llm_with_tools = None
         self.mcp_client = None
-        self.mcp_server_url = os.environ.get("DELTA_AI_MCP_SSE_URL", "http://127.0.0.1:8765/sse")
+        self.mcp_server_url = os.environ.get("DELTA_AI_MCP_URL", "http://127.0.0.1:8765/mcp")
 
         def agent_node(state: MessagesState):
             print("\nEntering agent_node")
@@ -143,7 +148,7 @@ class DeltaAIChat:
                 error_str = str(e)
                 print(f"{COLOR_RED}Error in agent_node: {error_str}{COLOR_RESET}")
                 if "401" in error_str:
-                    self.authenticate()
+                    self.authenticate(required=True)
                     self.initialize_clients()
                     if self._tool_schemas_loaded and self.tools:
                         self.llm_with_tools = self.llm.bind_tools(self.tools)
@@ -241,17 +246,14 @@ class DeltaAIChat:
         builder.add_conditional_edges("tools", should_continue, {"agent": "agent", END: END})
         self.graph = builder.compile()
 
-    def authenticate(self):
-        os.system(
-            "oci session authenticate --profile-name DEFAULT "
-            "--region EXAMPLE_REGION --tenancy-name EXAMPLE_TENANCY --auth security_token"
-        )
+    def authenticate(self, *, required: bool = False):
+        authenticate_session(self.auth_profile, required=required)
 
     def initialize_clients(self):
         self.llm = ChatOCIGenAI(
-            model_id="REDACTED_OCID",
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
+            model_id=required_env("DELTA_AI_LLM_MODEL_ID"),
+            service_endpoint=required_env("DELTA_AI_LLM_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_LLM_COMPARTMENT_ID"),
             auth_type="SECURITY_TOKEN",
             auth_profile=self.auth_profile,
             provider="generic",
@@ -259,9 +261,9 @@ class DeltaAIChat:
         )
 
         self.embeddings = OCIGenAIEmbeddings(
-            model_id="cohere.embed-english-v3.0",
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
+            model_id=required_env("DELTA_AI_EMBEDDING_MODEL_ID"),
+            service_endpoint=required_env("DELTA_AI_EMBEDDING_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID"),
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
             auth_profile=self.auth_profile
@@ -274,15 +276,14 @@ class DeltaAIChat:
         if self._tool_schemas_loaded:
             return
 
-        self.mcp_client = MultiServerMCPClient(
-            {
-                "delta-ai-tools": {
-                    "transport": "sse",
-                    "url": self.mcp_server_url,
-                }
-            }
-        )
-        self.tools = await self.mcp_client.get_tools()
+        self.mcp_client = MCPAdapter(self.mcp_server_url)
+        await self.mcp_client.__aenter__()
+        try:
+            self.tools = await self.mcp_client.list_tools()
+        except Exception:
+            await self.mcp_client.__aexit__(None, None, None)
+            self.mcp_client = None
+            raise
         self.llm_with_tools = self.llm.bind_tools(self.tools)
         self._tool_schemas_loaded = True
 
@@ -345,9 +346,10 @@ class DeltaAIChat:
             print(f"{COLOR_YELLOW}No history.{COLOR_RESET}")
 
     async def aclose(self):
-        close_method = getattr(self.mcp_client, "aclose", None)
-        if callable(close_method):
-            await close_method()
+        if self.mcp_client is not None:
+            await self.mcp_client.__aexit__(None, None, None)
+            self.mcp_client = None
+            self._tool_schemas_loaded = False
 
     # Used Only for terminal runs
     async def process_input(self, user_input):

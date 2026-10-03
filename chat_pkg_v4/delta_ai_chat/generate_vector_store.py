@@ -1,20 +1,24 @@
 import os
 
+try:
+    from delta_ai_chat.runtime_config import authenticate_session, required_env
+except ImportError:
+    from runtime_config import authenticate_session, required_env
+
 from langchain_community.document_loaders import DirectoryLoader, UnstructuredExcelLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OCIGenAIEmbeddings
-import subprocess
+from langchain_oci.embeddings import OCIGenAIEmbeddings
 
 def generate_vector_store():
-    profile_name = "DEFAULT"
+    profile_name = os.environ.get("DELTA_AI_PROFILE", "DEFAULT")
 
     try:
         # Initialize OCI Embeddings
         oci_embeddings = OCIGenAIEmbeddings(
-            model_id="cohere.embed-english-v3.0",
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
+            model_id=required_env("DELTA_AI_EMBEDDING_MODEL_ID"),
+            service_endpoint=required_env("DELTA_AI_EMBEDDING_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID"),
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
             auth_profile=profile_name
@@ -52,11 +56,11 @@ def generate_vector_store():
         error_str = str(e)
         if '401' in error_str:
             print(f"401 error detected during embedding initialization. Re-authenticating...")
-            subprocess.run("oci session authenticate --profile-name DEFAULT --region EXAMPLE_REGION --tenancy-name EXAMPLE_TENANCY --auth security_token", shell=True, check=True)
+            authenticate_session(profile_name, required=True)
             oci_embeddings = OCIGenAIEmbeddings(
-            model_id="cohere.embed-english-v3.0",
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
+            model_id=required_env("DELTA_AI_EMBEDDING_MODEL_ID"),
+            service_endpoint=required_env("DELTA_AI_EMBEDDING_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID"),
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
             auth_profile=profile_name

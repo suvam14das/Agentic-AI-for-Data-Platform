@@ -1,5 +1,7 @@
 oci
-langchain
+langchain[mcp]>=1.4,<2
+langchain-classic
+langgraph
 langchain-community
 jaydebeapi
 pandas
@@ -15,4 +17,3 @@ networkx
 msoffcrypto-tool
 matplotlib
 mcp>=2,<3
-langchain-mcp-adapters

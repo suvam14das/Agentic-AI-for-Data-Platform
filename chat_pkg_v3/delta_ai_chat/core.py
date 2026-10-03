@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 import os
+from delta_ai_chat.runtime_config import required_env
 import sys
 import uuid
 import pandas as pd
@@ -46,7 +47,7 @@ Rules :
 2. If the user is asking a Compute domain question that requires data from the DeltaLake DB then use the run_sql tool with appropriate SQL after confirming the query looks good from the user and getting user affirmation.
 3. Do not use tables that are not present in the database. Verify that columns are present for a given table from the retrived knowledge before using it in query.  
 4. Columns must be consistent to the table schema queried. Do not wrap the entire SQL in backticks. ALWAYS wrap column names that contains $ with single backticks. Always use full name of the column along with proper table alias in the SQL. Try to find the relevant columns within the same table to build the query. 
-5. Always use tables in SQL query in the format <database>.<table> e.g. example_db.hosts, example_db.instances etc. 
+5. Always use tables in SQL query in the format <database>.<table> e.g. example_db.hosts, example_db.instances etc.
 6. For relevant SQLs that supports limit if the limit of rows is not specified or evident use LIMIT 10. 
 7. For general questions, provide a polite direct and relevant response and if the answer is not known just say "Sorry I did not get you. My AI is not AIing!".
 8. If the user affirms a previous proposal, proceed with the action in the next response.
@@ -118,17 +119,16 @@ class VisualizeInput(BaseModel):
 
 class DeltaAIChat:
 
-    def __init__(self, profile_name='DEFAULT', summary_file="delta_ai_chat/general_docs/chat_history_summary.txt"):
+    def __init__(self, profile_name=os.environ.get("DELTA_AI_PROFILE", "DEFAULT"), summary_file="delta_ai_chat/general_docs/chat_history_summary.txt"):
 
         self.oc1_delta_conn = DataflowConnector(profile_name)
         self.summary_file = summary_file
         self.auth_profile = profile_name
 
         self.llm = ChatOCIGenAI(
-            # model_id="REDACTED_OCID", #gemini flash
-            model_id="REDACTED_OCID", #gemini pro
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
+            model_id=required_env("DELTA_AI_LLM_MODEL_ID"), #gemini pro
+            service_endpoint=required_env("DELTA_AI_LLM_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_LLM_COMPARTMENT_ID"),
             auth_type="SECURITY_TOKEN",
             auth_profile=self.auth_profile,
             provider="generic",
@@ -136,9 +136,9 @@ class DeltaAIChat:
         )
 
         self.embeddings = OCIGenAIEmbeddings(
-            model_id="cohere.embed-english-v3.0",
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
+            model_id=required_env("DELTA_AI_EMBEDDING_MODEL_ID"),
+            service_endpoint=required_env("DELTA_AI_EMBEDDING_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID"),
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
             auth_profile=profile_name,

@@ -1,20 +1,14 @@
 class LoadProperties:
 
     def __init__(self):
+        from delta_ai_chat.runtime_config import required_env
 
-        import json
-        # reading the data from the file
-        with open('delta_ai_chat/config.txt') as f:
-            data = f.read()
-
-        js = json.loads(data)
-
-        self.model_name = js["model_name"]
-        self.endpoint = js["endpoint"]
-        self.compartment_ocid = js["compartment_ocid"]
-        self.embedding_model_name=js["embedding_model_name"]
-        self.langchain_key = js["langchain_key"]
-        self.langchain_endpoint = js["langchain_endpoint"]
+        self.model_name = required_env("DELTA_AI_LLM_MODEL_ID")
+        self.endpoint = required_env("DELTA_AI_EMBEDDING_ENDPOINT")
+        self.compartment_ocid = required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID")
+        self.embedding_model_name = required_env("DELTA_AI_EMBEDDING_MODEL_ID")
+        self.langchain_key = ""
+        self.langchain_endpoint = ""
 
     def getModelName(self):
             return self.model_name

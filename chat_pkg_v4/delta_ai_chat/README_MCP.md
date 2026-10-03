@@ -1,79 +1,36 @@
-# Delta AI Chat v4 – MCP tools server + LangGraph core
+# Delta AI Chat MCP tools server
 
-This package is structured so that:
+The standalone MCP server exposes `retrieval`, `run_sql`, and `visualize` over
+Streamable HTTP. The LangGraph core can consume these tools from the same MCP
+endpoint.
 
-1. **LangGraph is used only inside the core** (`delta_ai_chat/core.py`) to orchestrate the agent flow.
-2. **All structured tools are exposed as MCP tools** via a standalone MCP server (`delta_ai_chat/tools_server.py`).
-3. The **tools MCP server can be used in two ways**:
-   - By the LangGraph core (agent) to execute tools (today: via local `ToolsManager`; optionally can be switched to an MCP client call pattern).
-   - By external agents/clients such as **Cline** or other MCP-compatible agents, **without** going through the LangGraph agent.
+## Configuration
 
-> Note: `delta_ai_chat/chat_mcp_server.py` still exists as an optional server that exposes a single `chat` tool (agent).  
-> The primary intended standalone MCP service is `tools_server.py` (tools only).
+Set these environment variables for the tools server:
 
----
+- `DELTA_AI_PROFILE`: OCI configuration profile (defaults to `DEFAULT`).
+- `DELTA_AI_JDBC_URL`: Dataflow Spark JDBC endpoint.
+- `DELTA_AI_EMBEDDING_MODEL_ID`: embedding model identifier.
+- `DELTA_AI_EMBEDDING_ENDPOINT`: embedding inference endpoint.
+- `DELTA_AI_EMBEDDING_COMPARTMENT_ID`: embedding compartment identifier.
 
-## Servers
+The LangGraph chat core also needs `DELTA_AI_LLM_MODEL_ID`,
+`DELTA_AI_LLM_ENDPOINT`, and `DELTA_AI_LLM_COMPARTMENT_ID`.
 
-### 1) Tools-only MCP server (recommended)
+If both `DELTA_AI_REGION` and `DELTA_AI_TENANCY_NAME` are set, the application
+starts or refreshes an OCI CLI session for the selected profile. Otherwise it
+uses a session that you have authenticated separately. These settings are not
+stored in this v4 package.
 
-Exposes the structured tools:
-- `retrieval`
-- `run_sql`
-- `format_to_html`
-- `visualize`
+## Run
 
-Run:
-
-```bash
-python -m delta_ai_chat.tools_server --host 127.0.0.1 --port 8765 --profile DEFAULT
-```
-
-Endpoints:
-- `GET /sse`
-- `POST /messages/`
-
-This server is meant to be registered in any MCP client (Cline, other agents, etc).
-
----
-
-### 2) Optional agent MCP server (single `chat` tool)
-
-Exposes:
-- `chat` → runs the LangGraph agent (`DeltaAIChat`)
-
-Run:
+From `chat_pkg_v4`:
 
 ```bash
-python -m delta_ai_chat.chat_mcp_server --host 127.0.0.1 --port 8766 --profile DEFAULT
+python -m delta_ai_chat.tools_server --host 127.0.0.1 --port 8765
 ```
 
----
-
-## How the pieces fit
-
-- `delta_ai_chat/tools_registry.py`
-  - Single source of truth for tool specs (name/description/input schema/handler)
-  - `ToolsManager.build_tool_specs()` produces the list of tools
-
-- `delta_ai_chat/tools_server.py`
-  - Publishes those tools as MCP tools (SSE/HTTP MCP server)
-  - **No LangGraph usage here**
-
-- `delta_ai_chat/core.py`
-  - LangGraph orchestration for the agent
-  - Uses tools from `ToolsManager` (local execution) today
-  - Can be adapted to call tools via MCP (remote execution) if desired
-
----
-
-## Docker / Backend notes
-
-The existing `Dockerfile` currently starts the FastAPI backend (`chat_app_backend.app:app`).
-If you want a container that exposes the MCP tools server instead, change `CMD` to:
-
-```dockerfile
-CMD ["python", "-m", "delta_ai_chat.tools_server", "--host", "0.0.0.0", "--port", "8765"]
-```
-
-Or keep both in separate containers.
+Register `http://127.0.0.1:8765/mcp` as a Streamable HTTP MCP server in your
+client. Override the bind address and port with `DELTA_AI_MCP_HOST` and
+`DELTA_AI_MCP_PORT`. The LangGraph core uses `DELTA_AI_MCP_URL` to point to the
+server when it is hosted elsewhere.

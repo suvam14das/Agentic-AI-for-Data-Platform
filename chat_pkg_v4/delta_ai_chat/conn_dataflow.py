@@ -1,5 +1,4 @@
 import re
-import subprocess
 import sys
 from time import sleep, time
 import math
@@ -9,6 +8,11 @@ import pandas as pd
 import jaydebeapi
 import jpype
 import os
+
+try:
+    from delta_ai_chat.runtime_config import required_env
+except ImportError:
+    from runtime_config import required_env
 
 # retry wrapper function
 def wrapper_retry_timer(self, func, n_retries=1, n_delay=1):
@@ -49,20 +53,17 @@ def wrapper_retry_timer(self, func, n_retries=1, n_delay=1):
 class DataflowConnector:
     _TUPLE_STR_RE = re.compile(r"^\(([^()]+)\)$")
     JDBC_JAR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SimbaSparkJDBC-2.6.18.2067/SimbaSparkJDBC42-2.6.18.2067/SparkJDBC42.jar")
-    BASE_JDBC_URL = "<JDBC-url>"
     JDBC_DRIVER = "com.simba.spark.jdbc.Driver"
 
     def __init__(self, profile_name):
         self.profile_name = profile_name
-        self.jdbc_url = f"{self.BASE_JDBC_URL};ociProfile={self.profile_name}"
+        self.jdbc_url = f"{required_env('DELTA_AI_JDBC_URL')};ociProfile={self.profile_name}"
         self.connection = None
         self.connect()
 
     def connect(self, retry=3):
         if not jpype.isJVMStarted():
             jpype.startJVM(classpath=[self.JDBC_JAR])
-
-        os.system("oci session authenticate --profile-name DEFAULT --region EXAMPLE_REGION --tenancy-name EXAMPLE_TENANCY --auth security_token")
 
         print(f"Connecting to Dataflow SQL endpoint with profile {self.profile_name}")
 
@@ -200,7 +201,7 @@ class DataflowConnector:
 
 
 if __name__ == "__main__":
-    dataflow_conn = DataflowConnector('DEFAULT')
+    dataflow_conn = DataflowConnector(os.environ.get("DELTA_AI_PROFILE", "DEFAULT"))
     sql_query = "SHOW DATABASES"
     df = dataflow_conn.pull_data(sql_query)
     if df is not None:

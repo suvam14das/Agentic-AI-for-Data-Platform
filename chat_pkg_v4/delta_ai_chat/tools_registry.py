@@ -6,9 +6,13 @@ from typing import Annotated, Any, Dict
 
 import pandas as pd
 from langchain_community.vectorstores import FAISS
-from langchain_oci.chat_models.oci_generative_ai import ChatOCIGenAI
 from langchain_oci.embeddings import OCIGenAIEmbeddings
 from pydantic import BaseModel, Field
+
+try:
+    from delta_ai_chat.runtime_config import authenticate_session, required_env
+except ImportError:
+    from runtime_config import authenticate_session, required_env
 
 
 # -----------------------------
@@ -40,11 +44,8 @@ class ToolsManager:
         self.authenticate()
         self.initialize_clients()
 
-    def authenticate(self):
-        os.system(
-            "oci session authenticate --profile-name DEFAULT "
-            "--region EXAMPLE_REGION --tenancy-name EXAMPLE_TENANCY --auth security_token"
-        )
+    def authenticate(self, *, required: bool = False):
+        authenticate_session(self.profile_name, required=required)
 
     def initialize_clients(self):
         # Local import to avoid import-time side effects for clients.
@@ -55,21 +56,10 @@ class ToolsManager:
 
         self.oc1_delta_conn = DataflowConnector(self.profile_name)
 
-        # LLM used for formatting SQL results into strict JSON
-        self.llm = ChatOCIGenAI(
-            model_id="REDACTED_OCID",  # gemini pro
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
-            auth_type="SECURITY_TOKEN",
-            auth_profile=self.profile_name,
-            provider="generic",
-            model_kwargs={"temperature": 0, "top_k": 1, "top_p": 0.1},
-        )
-
         self.embeddings = OCIGenAIEmbeddings(
-            model_id="cohere.embed-english-v3.0",
-            service_endpoint="https://example.invalid",
-            compartment_id="REDACTED_OCID",
+            model_id=required_env("DELTA_AI_EMBEDDING_MODEL_ID"),
+            service_endpoint=required_env("DELTA_AI_EMBEDDING_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID"),
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
             auth_profile=self.profile_name,
@@ -112,7 +102,7 @@ class ToolsManager:
         except Exception as e:
             error_str = str(e)
             if "401" in error_str:
-                self.authenticate()
+                self.authenticate(required=True)
                 self.initialize_clients()
                 try:
                     self.oc1_delta_conn.check_connection()
@@ -203,7 +193,7 @@ class ToolsManager:
             return "\n\n".join([d.page_content for d in docs])
         except Exception as e:
             if "401" in str(e):
-                self.authenticate()
+                self.authenticate(required=True)
                 self.initialize_clients()
                 docs = self.retriever.invoke(query)
                 return "\n\n".join([d.page_content for d in docs])
