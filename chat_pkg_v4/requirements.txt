@@ -14,5 +14,5 @@ uvicorn
 networkx
 msoffcrypto-tool
 matplotlib
-mcp
+mcp>=2,<3
 langchain-mcp-adapters
