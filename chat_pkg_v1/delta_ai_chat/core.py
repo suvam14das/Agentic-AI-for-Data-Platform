@@ -15,7 +15,6 @@ from langchain_core.prompts import PromptTemplate
 from langchain_oci.embeddings import OCIGenAIEmbeddings
 import re
 from langchain_community.vectorstores import FAISS
-from delta_ai_chat.LoadProperties import LoadProperties
 
 warnings.filterwarnings("ignore")
 
@@ -47,7 +46,6 @@ PROMPT = PromptTemplate(
 
 class DeltaAIChat:
     def __init__(self, profile_name=os.environ.get("DELTA_AI_PROFILE", "DEFAULT"), summary_file="delta_ai_chat/general_docs/chat_history_summary.txt"):
-        self.properties = LoadProperties()
         self.oc1_delta_conn = DataflowConnector(profile_name)
         self.summary_file = summary_file
 
@@ -62,9 +60,9 @@ class DeltaAIChat:
         )
 
         self.embeddings = OCIGenAIEmbeddings(
-            model_id=self.properties.getEmbeddingModelName(),
-            service_endpoint=self.properties.getEndpoint(),
-            compartment_id=self.properties.getCompartment(),
+            model_id=required_env("DELTA_AI_EMBEDDING_MODEL_ID"),
+            service_endpoint=required_env("DELTA_AI_EMBEDDING_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID"),
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
             auth_profile=profile_name,

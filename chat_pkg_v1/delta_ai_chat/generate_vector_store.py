@@ -5,20 +5,15 @@ from langchain_community.document_loaders import DirectoryLoader, UnstructuredEx
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_oci.embeddings import OCIGenAIEmbeddings
-try :
-    from delta_ai_chat.LoadProperties import LoadProperties
-except ImportError as e:
-    from LoadProperties import LoadProperties
 
 def generate_vector_store():
-    properties = LoadProperties()
 
     try:
         # Initialize OCI Embeddings
         oci_embeddings = OCIGenAIEmbeddings(
-            model_id=properties.getEmbeddingModelName(),
-            service_endpoint=properties.getEndpoint(),
-            compartment_id=properties.getCompartment(),
+            model_id=required_env("DELTA_AI_EMBEDDING_MODEL_ID"),
+            service_endpoint=required_env("DELTA_AI_EMBEDDING_ENDPOINT"),
+            compartment_id=required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID"),
             model_kwargs={"truncate": True},
             auth_type="SECURITY_TOKEN",
             auth_profile=os.environ.get("DELTA_AI_PROFILE", "DEFAULT")
@@ -57,9 +52,9 @@ def generate_vector_store():
             print(f"401 error detected during embedding initialization. Re-authenticating...")
             authenticate_session(os.environ.get("DELTA_AI_PROFILE", "DEFAULT"), required=True)
             oci_embeddings = OCIGenAIEmbeddings(
-                model_id=properties.getEmbeddingModelName(),
-                service_endpoint=properties.getEndpoint(),
-                compartment_id=properties.getCompartment(),
+                model_id=required_env("DELTA_AI_EMBEDDING_MODEL_ID"),
+                service_endpoint=required_env("DELTA_AI_EMBEDDING_ENDPOINT"),
+                compartment_id=required_env("DELTA_AI_EMBEDDING_COMPARTMENT_ID"),
                 model_kwargs={"truncate": True},
                 auth_type="SECURITY_TOKEN",
                 auth_profile=os.environ.get("DELTA_AI_PROFILE", "DEFAULT")
